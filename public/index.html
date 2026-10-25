@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="id"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live Photo Maker</title>
+<link rel="stylesheet" href="/style.css"></head><body>
+<div class="card">
+  <h1>Live Photo Maker</h1>
+  <div class="tabs">
+    <button class="tab on" data-t="live">Foto Live</button>
+    <button class="tab" data-t="hd">HD Foto</button>
+  </div>
+  <section id="live">
+  <p>Ubah video jadi foto live.</p>
+  <p class="hint">unggah video</p>
+  <input type="file" id="file" accept="video/*">
+  <div class="row"><span>Durasi klip</span>
+    <select id="dur"><option value="2">2 detik</option><option value="3" selected>3 detik</option><option value="5">5 detik</option></select></div>
+  <div class="row"><span>Flash</span>
+    <label class="sw"><input type="checkbox" id="flash"><span></span></label></div>
+  <button class="go" id="go">Buat Foto Live</button>
+  <div id="out"></div>
+  </section>
+  <section id="hd" hidden>
+  <p>Perbesar foto dan perjelas detail dengan AI (gratis).</p>
+  <p class="hint">unggah foto</p>
+  <input type="file" id="img" accept="image/*">
+  <div class="row"><span>Ukuran hasil</span>
+    <select id="size"><option value="640">Sedang (1280 px)</option><option value="1000">Besar (2000 px, lebih lama)</option></select></div>
+  <button class="go" id="hdgo">Buat HD</button>
+  <div id="out2"></div>
+  </section>
+</div>
+<script>
+const $=s=>document.querySelector(s), MAXS=720;
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+// gambar ulang tiap frame selama ms, supaya perekam terus menangkap frame
+const hold=(ms,draw)=>new Promise(res=>{const t0=performance.now();
+  (function loop(){draw();performance.now()-t0<ms?requestAnimationFrame(loop):res()})()});
+const loadImg=src=>new Promise((ok,no)=>{const i=new Image();i.onload=()=>ok(i);i.onerror=no;i.src=src});
+
+async function loadVideo(f){
+  const v=document.createElement("video");
+  v.muted=true;v.playsInline=true;v.setAttribute("playsinline","");v.preload="auto";
+  v.style.cssText="position:fixed;bottom:0;right:0;width:2px;height:2px;opacity:.01;pointer-events:none";
+  document.body.appendChild(v);v.src=URL.createObjectURL(f);
+  await new Promise((ok,no)=>{v.onloadedmetadata=ok;
+    v.onerror=()=>no(new Error("Video tidak bisa dibaca di browser ini"));
+    setTimeout(()=>no(new Error("Video terlalu lama dimuat")),15000)});
+  try{await v.play();v.pause()}catch(e){}
+  return v;
+}
+const seek=(v,t)=>new Promise(r=>{let d=false;
+  const fin=()=>{if(!d){d=true;v.removeEventListener("seeked",fin);r()}};
+  v.addEventListener("seeked",fin);
+  const same=Math.abs(v.currentTime-t)<0.02;v.currentTime=t;setTimeout(fin,same?150:2500)});
+
+function pickMime(){
+  return ["video/mp4;codecs=avc1","video/mp4","video/webm;codecs=vp9","video/webm"]
+    .find(t=>window.MediaRecorder&&MediaRecorder.isTypeSupported(t));
+}
+
+$("#go").onclick=async()=>{
+  const f=$("#file").files[0],out=$("#out");
+  if(!f){out.innerHTML='<span class="err">Pilih video dulu</span>';return}
+  const mime=pickMime();
+  if(!mime){out.innerHTML='<span class="err">Browser ini belum mendukung perekaman video.<br>Jika error, refresh browser Anda.</span>';return}
+  $("#go").disabled=true;let v;
+  try{
+    out.textContent="Membaca video...";
+    v=await loadVideo(f);const d=v.duration;
+    if(!isFinite(d)||!v.videoWidth)throw new Error("Durasi/ukuran video tidak terbaca");
+    const clip=Math.min(+$("#dur").value,d), start=Math.max(0,d/2-clip/2), mid=start+clip/2;
+    const sc=Math.min(1,MAXS/Math.max(v.videoWidth,v.videoHeight));
+    const W=Math.round(v.videoWidth*sc/2)*2, H=Math.round(v.videoHeight*sc/2)*2;
+    const c=document.createElement("canvas");c.width=W;c.height=H;
+    const ctx=c.getContext("2d");
+
+    // 1) foto utama = frame TENGAH video
+    await seek(v,mid);ctx.drawImage(v,0,0,W,H);
+    const kc=document.createElement("canvas");kc.width=W;kc.height=H;kc.getContext("2d").drawImage(c,0,0);
+
+    // 2) frame kilatan flash dibuat oleh Python di server
+    let fl=null;
+    if($("#flash").checked){
+      out.textContent="Membuat efek flash...";
+      const fd=new FormData();
+      fd.append("key",await new Promise(r=>kc.toBlob(r,"image/jpeg",0.85)),"key.jpg");
+      const r=await fetch("/api/flash",{method:"POST",body:fd});
+      if(!r.ok){let m;try{m=(await r.json()).error}catch(e){}throw new Error(m||`Server menolak (HTTP ${r.status})`)}
+      const j=await r.json();
+      fl={imgs:await Promise.all(j.frames.map(loadImg)),dur:j.durations,hold:j.hold_ms};
+    }
+
+    // 3) rekam: klip -> flash -> foto diam
+    out.textContent=`Merekam ${clip.toFixed(1)} detik...`;
+    const chunks=[],rec=new MediaRecorder(c.captureStream(30),{mimeType:mime,videoBitsPerSecond:4e6});
+    rec.ondataavailable=e=>e.data.size&&chunks.push(e.data);
+    const stopped=new Promise(r=>rec.onstop=r);
+    await seek(v,start);ctx.drawImage(v,0,0,W,H);
+    rec.start();await v.play();
+    const t0=performance.now();
+    await new Promise(res=>{(function loop(){ctx.drawImage(v,0,0,W,H);
+      if(v.currentTime>=start+clip||v.ended||performance.now()-t0>(clip+2)*1000)res();
+      else requestAnimationFrame(loop)})()});
+    v.pause();
+    if(fl)for(let i=0;i<fl.imgs.length;i++)await hold(fl.dur[i],()=>ctx.drawImage(fl.imgs[i],0,0,W,H));
+    await hold(fl?fl.hold:1500,()=>ctx.drawImage(kc,0,0));
+    rec.stop();await stopped;
+
+    const type=mime.split(";")[0], ext=type.includes("mp4")?"mp4":"webm";
+    const blob=new Blob(chunks,{type}), url=URL.createObjectURL(blob), name=`live-photo.${ext}`;
+    out.innerHTML=`<video src="${url}" autoplay loop muted playsinline controls></video>
+      <div class="btns"><button id="share">Simpan ke Galeri</button><a href="${url}" download="${name}">Unduh</a></div>`;
+    $("#share").onclick=async()=>{
+      const file=new File([blob],name,{type});
+      if(navigator.canShare&&navigator.canShare({files:[file]})){
+        try{await navigator.share({files:[file]})}catch(e){}
+      }else{const a=document.createElement("a");a.href=url;a.download=name;a.click()}
+    };
+  }catch(e){out.innerHTML=`<span class="err">${e.message}<br>Jika error, refresh browser Anda.</span>`}
+  if(v)v.remove();
+  $("#go").disabled=false;
+};
+
+document.querySelectorAll(".tab").forEach(b=>b.onclick=()=>{
+  document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("on",x===b));
+  $("#live").hidden=b.dataset.t!=="live";$("#hd").hidden=b.dataset.t!=="hd";
+});
+
+const loadScript=src=>new Promise((ok,no)=>{const s=document.createElement("script");
+  s.src=src;s.onload=ok;s.onerror=()=>no(new Error("Gagal memuat AI"));document.head.appendChild(s)});
+const B="https://cdn.jsdelivr.net/npm/";
+let upscaler,wasmLoaded=false;
+async function loadCore(){            // AI gratis, jalan di HP (TensorFlow.js + ESRGAN)
+  if(window.Upscaler)return;
+  await loadScript(B+"@tensorflow/tfjs@latest/dist/tf.min.js");
+  await loadScript(B+"@upscalerjs/default-model@latest/dist/umd/index.min.js");
+  await loadScript(B+"upscaler@latest/dist/browser/umd/upscaler.min.js");
+}
+async function useBackend(name){
+  await loadCore();
+  if(name==="wasm"&&!wasmLoaded){
+    await loadScript(B+"@tensorflow/tfjs-backend-wasm@latest/dist/tf-backend-wasm.min.js");
+    if(tf.wasm&&tf.wasm.setWasmPaths)tf.wasm.setWasmPaths(B+"@tensorflow/tfjs-backend-wasm@latest/dist/");
+    wasmLoaded=true;
+  }
+  await tf.setBackend(name);await tf.ready();
+  if(tf.getBackend()!==name)throw new Error("backend "+name+" tidak tersedia");
+  upscaler=new Upscaler({model:DefaultUpscalerJSModel});
+}
+// kecilkan bertahap lalu ambil piksel, untuk membandingkan hasil dengan aslinya
+function small(src,N){
+  let w=src.naturalWidth||src.width,h=src.naturalHeight||src.height,cur=src;
+  while(w>N*2||h>N*2){
+    w=Math.max(N,Math.floor(w/2));h=Math.max(N,Math.floor(h/2));
+    const c=document.createElement("canvas");c.width=w;c.height=h;
+    const x=c.getContext("2d");x.imageSmoothingQuality="high";x.drawImage(cur,0,0,w,h);cur=c;
+  }
+  const f=document.createElement("canvas");f.width=f.height=N;
+  const x=f.getContext("2d");x.drawImage(cur,0,0,N,N);return x.getImageData(0,0,N,N).data;
+}
+// hasil AI yang benar harus mirip foto aslinya; kalau jauh beda berarti rusak (bug GPU HP)
+function broken(a,b){
+  const A=small(a,24),Z=small(b,24),n=A.length/4;let t=0,m=0;
+  for(let i=0;i<A.length;i+=4){
+    const d=(Math.abs(A[i]-Z[i])+Math.abs(A[i+1]-Z[i+1])+Math.abs(A[i+2]-Z[i+2]))/3;
+    t+=d;if(d>m)m=d;
+  }
+  return t/n>14||m>70;
+}
+async function runAI(c,out){
+  let pref=null;try{pref=localStorage.getItem("be")}catch(e){}
+  for(const be of(pref==="wasm"?["wasm"]:["webgl","wasm"])){
+    try{
+      out.textContent=be==="wasm"?"Memuat AI mode kompatibel...":"Memuat AI (pertama kali agak lama)...";
+      await useBackend(be);
+      const src=await upscaler.upscale(c,{patchSize:64,padding:5,progress:p=>{
+        out.textContent=`Memproses AI ${Math.round(p>1?p:p*100)}%`+(be==="wasm"?" (mode kompatibel, bisa 1-3 menit)":"")+". Jangan tutup halaman."}});
+      const img=await loadImg(src);
+      if(broken(c,img)){
+        if(be==="webgl"){try{localStorage.setItem("be","wasm")}catch(e){}}
+        continue;                       // hasil rusak -> coba mode berikutnya
+      }
+      return {img,be};
+    }catch(e){console.error(e)}
+  }
+  throw new Error("AI gagal");
+}
+
+$("#hdgo").onclick=async()=>{
+  const f=$("#img").files[0],out=$("#out2");
+  if(!f){out.innerHTML='<span class="err">Pilih foto dulu</span>';return}
+  $("#hdgo").disabled=true;
+  try{
+    out.textContent="Menyiapkan foto...";
+    let bm;
+    try{bm=await createImageBitmap(f,{imageOrientation:"from-image"})}catch(e){bm=await createImageBitmap(f)}
+    const sc=Math.min(1,+$("#size").value/Math.max(bm.width,bm.height));
+    const c=document.createElement("canvas");
+    c.width=Math.round(bm.width*sc);c.height=Math.round(bm.height*sc);
+    c.getContext("2d").drawImage(bm,0,0,c.width,c.height);
+    let blob,note;
+    try{
+      const {img,be}=await runAI(c,out),oc=document.createElement("canvas");
+      oc.width=img.naturalWidth;oc.height=img.naturalHeight;
+      oc.getContext("2d").drawImage(img,0,0);
+      blob=await new Promise(r=>oc.toBlob(r,"image/jpeg",0.93));
+      note=`Diproses dengan AI (ESRGAN) langsung di HP kamu (${be}).`;
+    }catch(e){
+      console.error(e);
+      out.textContent="AI tidak bisa jalan di browser ini, memakai mode dasar...";
+      const fd=new FormData();
+      fd.append("image",await new Promise(r=>c.toBlob(r,"image/jpeg",0.92)),"photo.jpg");
+      const r=await fetch("/api/hd",{method:"POST",body:fd});
+      if(!r.ok)throw new Error(`Server menolak (HTTP ${r.status})`);
+      blob=await r.blob();note="Mode dasar: AI tidak berjalan baik di HP ini, hasil hanya diperbesar dan dipertajam biasa.";
+    }
+    const url=URL.createObjectURL(blob);
+    out.innerHTML=`<img src="${url}"><div class="btns"><button id="share2">Simpan ke Galeri</button><a href="${url}" download="foto-hd.jpg">Unduh</a></div><p class="note">${note}</p>`;
+    $("#share2").onclick=async()=>{
+      const file=new File([blob],"foto-hd.jpg",{type:"image/jpeg"});
+      if(navigator.canShare&&navigator.canShare({files:[file]})){try{await navigator.share({files:[file]})}catch(e){}}
+      else{const a=document.createElement("a");a.href=url;a.download="foto-hd.jpg";a.click()}
+    };
+  }catch(e){out.innerHTML=`<span class="err">${e.message}<br>Jika error, refresh browser Anda.</span>`}
+  $("#hdgo").disabled=false;
+};
+</script></body></html>
