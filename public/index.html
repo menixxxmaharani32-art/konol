@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="id"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live Photo Maker</title>
+<link rel="stylesheet" href="/style.css"></head><body>
+<div class="card">
+  <h1>Live Photo Maker</h1>
+  <p>Ubah video jadi foto live.</p>
+  <p class="hint">unggah video</p>
+  <input type="file" id="file" accept="video/*">
+  <div class="row"><span>Durasi klip</span>
+    <select id="dur"><option value="2">2 detik</option><option value="3" selected>3 detik</option><option value="5">5 detik</option></select></div>
+  <div class="row"><span>Flash</span>
+    <label class="sw"><input type="checkbox" id="flash"><span></span></label></div>
+  <button class="go" id="go">Buat Foto Live</button>
+  <div id="out"></div>
+</div>
+<script>
+const $=s=>document.querySelector(s), MAXS=720;
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+// gambar ulang tiap frame selama ms, supaya perekam terus menangkap frame
+const hold=(ms,draw)=>new Promise(res=>{const t0=performance.now();
+  (function loop(){draw();performance.now()-t0<ms?requestAnimationFrame(loop):res()})()});
+const loadImg=src=>new Promise((ok,no)=>{const i=new Image();i.onload=()=>ok(i);i.onerror=no;i.src=src});
+
+async function loadVideo(f){
+  const v=document.createElement("video");
+  v.muted=true;v.playsInline=true;v.setAttribute("playsinline","");v.preload="auto";
+  v.style.cssText="position:fixed;bottom:0;right:0;width:2px;height:2px;opacity:.01;pointer-events:none";
+  document.body.appendChild(v);v.src=URL.createObjectURL(f);
+  await new Promise((ok,no)=>{v.onloadedmetadata=ok;
+    v.onerror=()=>no(new Error("Video tidak bisa dibaca di browser ini"));
+    setTimeout(()=>no(new Error("Video terlalu lama dimuat")),15000)});
+  try{await v.play();v.pause()}catch(e){}
+  return v;
+}
+const seek=(v,t)=>new Promise(r=>{let d=false;
+  const fin=()=>{if(!d){d=true;v.removeEventListener("seeked",fin);r()}};
+  v.addEventListener("seeked",fin);
+  const same=Math.abs(v.currentTime-t)<0.02;v.currentTime=t;setTimeout(fin,same?150:2500)});
+
+function pickMime(){
+  return ["video/mp4;codecs=avc1","video/mp4","video/webm;codecs=vp9","video/webm"]
+    .find(t=>window.MediaRecorder&&MediaRecorder.isTypeSupported(t));
+}
+
+$("#go").onclick=async()=>{
+  const f=$("#file").files[0],out=$("#out");
+  if(!f){out.innerHTML='<span class="err">Pilih video dulu</span>';return}
+  const mime=pickMime();
+  if(!mime){out.innerHTML='<span class="err">Browser ini belum mendukung perekaman video.<br>Jika error, refresh browser Anda.</span>';return}
+  $("#go").disabled=true;let v;
+  try{
+    out.textContent="Membaca video...";
+    v=await loadVideo(f);const d=v.duration;
+    if(!isFinite(d)||!v.videoWidth)throw new Error("Durasi/ukuran video tidak terbaca");
+    const clip=Math.min(+$("#dur").value,d), start=Math.max(0,d/2-clip/2), mid=start+clip/2;
+    const sc=Math.min(1,MAXS/Math.max(v.videoWidth,v.videoHeight));
+    const W=Math.round(v.videoWidth*sc/2)*2, H=Math.round(v.videoHeight*sc/2)*2;
+    const c=document.createElement("canvas");c.width=W;c.height=H;
+    const ctx=c.getContext("2d");
+
+    // 1) foto utama = frame TENGAH video
+    await seek(v,mid);ctx.drawImage(v,0,0,W,H);
+    const kc=document.createElement("canvas");kc.width=W;kc.height=H;kc.getContext("2d").drawImage(c,0,0);
+
+    // 2) frame kilatan flash dibuat oleh Python di server
+    let fl=null;
+    if($("#flash").checked){
+      out.textContent="Membuat efek flash...";
+      const fd=new FormData();
+      fd.append("key",await new Promise(r=>kc.toBlob(r,"image/jpeg",0.85)),"key.jpg");
+      const r=await fetch("/api/flash",{method:"POST",body:fd});
+      if(!r.ok){let m;try{m=(await r.json()).error}catch(e){}throw new Error(m||`Server menolak (HTTP ${r.status})`)}
+      const j=await r.json();
+      fl={imgs:await Promise.all(j.frames.map(loadImg)),dur:j.durations,hold:j.hold_ms};
+    }
+
+    // 3) rekam: klip -> flash -> foto diam
+    out.textContent=`Merekam ${clip.toFixed(1)} detik...`;
+    const chunks=[],rec=new MediaRecorder(c.captureStream(30),{mimeType:mime,videoBitsPerSecond:4e6});
+    rec.ondataavailable=e=>e.data.size&&chunks.push(e.data);
+    const stopped=new Promise(r=>rec.onstop=r);
+    await seek(v,start);ctx.drawImage(v,0,0,W,H);
+    rec.start();await v.play();
+    const t0=performance.now();
+    await new Promise(res=>{(function loop(){ctx.drawImage(v,0,0,W,H);
+      if(v.currentTime>=start+clip||v.ended||performance.now()-t0>(clip+2)*1000)res();
+      else requestAnimationFrame(loop)})()});
+    v.pause();
+    if(fl)for(let i=0;i<fl.imgs.length;i++)await hold(fl.dur[i],()=>ctx.drawImage(fl.imgs[i],0,0,W,H));
+    await hold(fl?fl.hold:1500,()=>ctx.drawImage(kc,0,0));
+    rec.stop();await stopped;
+
+    const type=mime.split(";")[0], ext=type.includes("mp4")?"mp4":"webm";
+    const blob=new Blob(chunks,{type}), url=URL.createObjectURL(blob), name=`live-photo.${ext}`;
+    out.innerHTML=`<video src="${url}" autoplay loop muted playsinline controls></video>
+      <div class="btns"><button id="share">Simpan ke Galeri</button><a href="${url}" download="${name}">Unduh</a></div>`;
+    $("#share").onclick=async()=>{
+      const file=new File([blob],name,{type});
+      if(navigator.canShare&&navigator.canShare({files:[file]})){
+        try{await navigator.share({files:[file]})}catch(e){}
+      }else{const a=document.createElement("a");a.href=url;a.download=name;a.click()}
+    };
+  }catch(e){out.innerHTML=`<span class="err">${e.message}<br>Jika error, refresh browser Anda.</span>`}
+  if(v)v.remove();
+  $("#go").disabled=false;
+};
+</script></body></html>
