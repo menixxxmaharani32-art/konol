@@ -41,14 +41,18 @@ const hold=(ms,draw)=>new Promise(res=>{const t0=performance.now();
 // permukaan terang ikut menyala, ada pendaran, warna cahaya hangat. l = naik terang (level) di adegan normal, t = warna cahaya.
 // Fase gelap = kamera menyesuaikan eksposur setelah flash. SEMUA cahaya dihitung SEBELUM merekam (1 operasi gambar per frame),
 // supaya perekaman tetap mulus dan video tidak terlihat "loncat/dipercepat" di HP yang lambat.
-const KF={
+const OLD={                                   // pola dari video contoh: jepretan (kilat hangat) -> gelap sesaat -> kilat terang
   0:{l:12,t:[1,.9,.76]},1:{l:12,t:[1,.9,.76]},2:{l:9,t:[1,.9,.76]},3:{l:7,t:[1,.9,.78]},
   4:{l:3,t:[1,.92,.82]},5:{l:1.2,t:[1,.94,.86]},
   12:{dip:1},13:{dip:1},14:{dip:1},
   15:{l:12,t:[1,.97,.9]},16:{l:12,t:[1,.97,.9]},17:{l:100,t:[0,.5,1],m:[.9,.82,.91]},
   18:{l:18,t:[1,1,.95]},19:{l:21,t:[1,1,.95]},20:{l:15,t:[1,1,.95]}
 };
-const BLINK_DUR=21/25,LK=142,CUT_N=17;     // LK = level terang per 1.0 gain (kalibrasi); CUT_N = frame kebiruan, tempat potong ke foto
+// JEPRETAN PERTAMA (baru): naik seketika, DITAHAN sebentar di puncak, lalu meredup. Jepretan lama jadi jepretan kedua.
+const SH=11,KF={};
+[13,13,13,13,13,8,4.5,1.8].forEach((l,i)=>KF[i]={l,t:[1,.9,.76]});   // 5 frame ditahan (0,2 dtk) + redup 3 frame
+for(const n in OLD)KF[+n+SH]=OLD[n];                                  // jeda 3 frame lalu pola lama
+const CUT_N=17+SH,BLINK_LAST=20+SH,BLINK_DUR=(BLINK_LAST+1)/25,LK=142;   // CUT_N = frame kebiruan, tempat potong ke foto
 function mkCanvas(W,H){const c=document.createElement("canvas");c.width=W;c.height=H;return c}
 function makeRig(W,H,kc,k){
   const sw=Math.max(8,W>>3),sh=Math.max(8,H>>3);
@@ -165,7 +169,7 @@ $("#go").onclick=async()=>{
       ctx.globalCompositeOperation="source-over";ctx.globalAlpha=1;
       const n=flashOn?Math.floor((v.currentTime-start-tb)/bs*25):-1;
       ctx.drawImage(n>=CUT_N?kc:v,0,0,W,H);                              // potong ke foto tepat di frame kebiruan (tanpa pemudaran)
-      if(n>=0&&n<=20)applyBlink(ctx,rig,n,W,H);
+      if(n>=0&&n<=BLINK_LAST)applyBlink(ctx,rig,n,W,H);
       if(v.currentTime>=start+clip||v.ended||performance.now()-t0>(clip+2)*1000)res();
       else requestAnimationFrame(loop)})()});
     v.pause();
