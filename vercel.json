@@ -1,3 +1,7 @@
 {
-  "functions": { "app.py": { "maxDuration": 30, "includeFiles": "*.{html,css}" } }
+  "version": 2,
+  "builds": [
+    { "src": "app.py", "use": "@vercel/python", "config": { "includeFiles": ["index.html", "style.css"] } }
+  ],
+  "routes": [{ "src": "/(.*)", "dest": "app.py" }]
 }
